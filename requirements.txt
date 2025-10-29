@@ -1,0 +1,11 @@
+requests
+psycopg2-binary
+transformers
+torch
+tqdm
+pandas
+numpy
+python-dotenv
+pydantic
+pyahocorasick
+concurrent-log-handler
