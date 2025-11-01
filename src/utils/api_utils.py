@@ -70,7 +70,7 @@ def fetch_sector_articles(sector_name, query):
             )
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
-            logging.warning(f"⚠️ Request failed for {sector_name} page {page}: {e}")
+            logging.warning(f"Request failed for {sector_name} page {page}: {e}")
             break
 
         data = response.json()
@@ -111,7 +111,7 @@ def fetch_articles_threaded(sector_queries):
             try:
                 articles = future.result()
                 all_articles.extend(articles)
-                logging.info(f"✅ Completed sector fetch: {sector} ({len(articles)} articles)")
+                logging.info(f"Completed sector fetch: {sector} ({len(articles)} articles)")
             except Exception as e:
                 logging.error(f"Failed to fetch sector {sector}: {e}")
 
