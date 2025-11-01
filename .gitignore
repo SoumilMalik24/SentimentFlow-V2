@@ -2,7 +2,10 @@
 __pycache__/
 *.py[codz]
 *$py.class
-
+venv311
+src/sentiments/datasets
+src/sentiments/processed
+src/sentiments/zero_shot_news_sentiment_analyzer_startups
 # C extensions
 *.so
 
