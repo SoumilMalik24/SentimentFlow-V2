@@ -1,10 +1,10 @@
 import psycopg2
-from psycopg2.extras import execute_batch
+from psycopg2.extras import RealDictCursor, execute_batch
 import uuid
-import hashlib
 from datetime import datetime
 from src.core.config import settings
 from src.core.logger import logging
+from src.constants import MAX_CONTENT_PREVIEW
 
 # =========================================================
 # DB CONNECTION
@@ -19,133 +19,136 @@ def get_connection():
         logging.error(f"Database connection failed: {e}")
         raise
 
-
 # =========================================================
-# DETERMINISTIC STARTUP ID GENERATOR
+# FETCH STARTUPS
 # =========================================================
-def generate_startup_id(name: str, sector_id: str) -> str:
-    """
-    Generates a deterministic, readable, unique ID based on startup name and sector ID.
-    Example: swiggy-51f4a2-9f2d
-    """
-    base_str = f"{name.lower()}|{sector_id.lower()}"
-    namespace = uuid.UUID("12345678-1234-5678-1234-567812345678")
-    stable_uuid = uuid.uuid5(namespace, base_str)
-
-    short_hash = hashlib.md5(base_str.encode()).hexdigest()[:6]
-    suffix = str(stable_uuid).split('-')[-1][:4]
-
-    readable_name = name.lower().replace(" ", "-")
-    final_id = f"{readable_name}-{short_hash}-{suffix}"
-    return final_id
-
-
-# =========================================================
-# STARTUP INSERT
-# =========================================================
-def insert_startup(conn, startup):
-    """
-    Insert or ignore a startup entry.
-    startup = {
-        "name": str,
-        "sectorId": str,
-        "description": str,
-        "imageUrl": str,
-        "findingKeywords": list
-    }
-    """
+def fetch_all_startups(conn):
+    """Fetch all startups (id, name, sectorId) from the DB."""
     try:
-        cur = conn.cursor()
-        startup_id = generate_startup_id(startup["name"], startup["sectorId"])
-        cur.execute("""
-            INSERT INTO "Startups"
-            (id, name, "sectorId", description, "imageUrl", "findingKeywords", "createdAt")
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (id) DO NOTHING;
-        """, (
-            startup_id,
-            startup["name"],
-            startup["sectorId"],
-            startup.get("description", ""),
-            startup.get("imageUrl", ""),
-            startup.get("findingKeywords", []),
-            datetime.now()
-        ))
-        conn.commit()
-        logging.info(f"Startup inserted/exists: {startup['name']} ({startup_id})")
-        return startup_id
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id, name, "sectorId"
+                FROM "Startups"
+            """)
+            rows = cur.fetchall()
+            logging.info(f"Fetched {len(rows)} startups from DB.")
+            return rows
     except Exception as e:
-        conn.rollback()
-        logging.error(f"Failed to insert startup {startup['name']}: {e}")
+        logging.error(f"Failed to fetch startups: {e}")
         raise
 
-
 # =========================================================
-# ARTICLE UPSERT (CREATE IF NOT EXISTS)
+# FETCH SECTORS
 # =========================================================
-def find_or_create_article(conn, article):
-    """
-    Insert article if not exists, else return existing ID.
-    Returns article_id (UUID)
-    """
+def fetch_sector_map(conn):
+    """Fetch a map of {sector_id: sector_name}."""
     try:
-        cur = conn.cursor()
-        cur.execute('SELECT id FROM "Articles" WHERE url = %s', (article["url"],))
-        result = cur.fetchone()
-        if result:
-            return result[0]
+        with conn.cursor() as cur:
+            cur.execute('SELECT id, name FROM "Sector"')
+            rows = cur.fetchall()
+            sector_map = {row[0]: row[1] for row in rows}
+            logging.info(f"Fetched {len(sector_map)} sectors from DB.")
+            return sector_map
+    except Exception as e:
+        logging.error(f"Failed to fetch sector map: {e}")
+        raise
 
-        article_id = str(uuid.uuid4())
+# =========================================================
+# FETCH EXISTING ARTICLE URLS
+# =========================================================
+def fetch_existing_urls(conn):
+    """Fetch all existing article URLs for deduplication."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute('SELECT url FROM "Articles"')
+            urls = {row[0] for row in cur.fetchall() if row[0]}
+            logging.info(f"Cached {len(urls)} existing article URLs.")
+            return urls
+    except Exception as e:
+        logging.error(f"Failed to fetch URLs: {e}")
+        return set()
+
+# =========================================================
+# BATCH INSERT ARTICLES
+# =========================================================
+def batch_insert_articles(conn, articles: list):
+    """
+    Batch-inserts new articles.
+    Does NOT commit; the pipeline must handle the transaction.
+    
+    articles (list[dict]): List of NewsAPI article dictionaries
+    """
+    if not articles:
+        logging.info("No new articles to insert.")
+        return
+
+    insert_data = []
+    for article in articles:
+        # Prepare content: truncate if necessary
         content = (article.get("content") or article.get("description") or "").strip()
-        if len(content) > 300:
-            content = content[:300].rsplit(" ", 1)[0] + "..."
-
-        cur.execute("""
-            INSERT INTO "Articles"
-            (id, title, url, content, "publishedAt", "createdAt")
-            VALUES (%s, %s, %s, %s, %s, %s)
-        """, (
-            article_id,
+        if len(content) > MAX_CONTENT_PREVIEW:
+            content = content[:MAX_CONTENT_PREVIEW].rsplit(" ", 1)[0] + "..."
+            
+        insert_data.append((
+            str(uuid.uuid4()),
             article.get("title", "untitled"),
             article["url"],
             content,
             article.get("publishedAt"),
             datetime.now()
         ))
-        conn.commit()
-        logging.info(f"Article inserted: {article.get('title')[:70]}")
-        return article_id
+
+    try:
+        with conn.cursor() as cur:
+            execute_batch(cur, """
+                INSERT INTO "Articles"
+                (id, title, url, content, "publishedAt", "createdAt")
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (url) DO NOTHING;
+            """, insert_data)
+            logging.info(f"Batch inserted/ignored {len(insert_data)} articles.")
     except Exception as e:
-        conn.rollback()
-        logging.error(f"Failed to insert article: {e}")
+        logging.error(f"Failed to batch insert articles: {e}")
         raise
 
+# =========================================================
+# GET ARTICLES BY URLS
+# =========================================================
+def get_articles_by_urls(conn, urls: list):
+    """
+    Fetches newly inserted articles (with their DB IDs) by their URLs.
+    Returns a dict {url: article_row}
+    """
+    if not urls:
+        return {}
+        
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id, title, content, url FROM "Articles" WHERE url = ANY(%s)
+            """, (urls,))
+            rows = cur.fetchall()
+            logging.info(f"Fetched {len(rows)} articles by URL to get their IDs.")
+            return {row['url']: row for row in rows}
+    except Exception as e:
+        logging.error(f"Failed to get articles by URLs: {e}")
+        raise
 
 # =========================================================
-# SENTIMENT INSERT (NEW STRUCTURE)
+# BATCH INSERT SENTIMENTS
 # =========================================================
-def insert_article_sentiment(conn, record):
+def batch_insert_article_sentiments(conn, sentiment_records):
     """
-    Inserts one record into ArticleSentiment table.
-    record = {
-        "articleId": str,
-        "startupId": str,
-        "positiveScore": float,
-        "negativeScore": float,
-        "neutralScore": float,
-        "sentiment": str
-    }
+    Batch-inserts multiple sentiment analysis results.
+    Does NOT commit; the pipeline must handle the transaction.
     """
-    try:
-        cur = conn.cursor()
-        sentiment_id = str(uuid.uuid4())
-        cur.execute("""
-            INSERT INTO "ArticleSentiment"
-            (id, "articleId", "startupId", "positiveScore", "negativeScore", "neutralScore", sentiment, "createdAt")
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT DO NOTHING;
-        """, (
-            sentiment_id,
+    if not sentiment_records:
+        logging.info("No sentiment records to insert.")
+        return
+
+    insert_data = [
+        (
+            str(uuid.uuid4()),
             record["articleId"],
             record["startupId"],
             record["positiveScore"],
@@ -153,56 +156,19 @@ def insert_article_sentiment(conn, record):
             record["neutralScore"],
             record["sentiment"],
             datetime.now()
-        ))
-        conn.commit()
-        logging.info(f"Sentiment inserted for startup {record['startupId']} ({record['sentiment']})")
-    except Exception as e:
-        conn.rollback()
-        logging.error(f"Failed to insert sentiment: {e}")
-        raise
-
-
-# =========================================================
-# BATCH SENTIMENT INSERT
-# =========================================================
-def batch_insert_article_sentiments(conn, records):
-    """
-    Batch insert for multiple startup–article sentiments.
-    records = [
-        (uuid, articleId, startupId, positive, negative, neutral, sentiment)
+        )
+        for record in sentiment_records
     ]
-    """
+
     try:
-        cur = conn.cursor()
-        execute_batch(cur, """
-            INSERT INTO "ArticleSentiment"
-            (id, "articleId", "startupId", "positiveScore", "negativeScore", "neutralScore", sentiment, "createdAt")
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT DO NOTHING;
-        """, [
-            (str(uuid.uuid4()), r["articleId"], r["startupId"], r["positiveScore"],
-             r["negativeScore"], r["neutralScore"], r["sentiment"], datetime.now())
-            for r in records
-        ])
-        conn.commit()
-        logging.info(f"Batch inserted {len(records)} sentiment rows.")
+        with conn.cursor() as cur:
+            execute_batch(cur, """
+                INSERT INTO "ArticleSentiment"
+                (id, "articleId", "startupId", "positiveScore", "negativeScore", "neutralScore", sentiment, "createdAt")
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT ("articleId", "startupId") DO NOTHING;
+            """, insert_data)
+        logging.info(f"Batch inserted {len(insert_data)} sentiment rows.")
     except Exception as e:
-        conn.rollback()
-        logging.error(f"Batch insert failed: {e}")
+        logging.error(f"Failed to batch insert sentiments: {e}")
         raise
-
-
-# =========================================================
-# FETCH EXISTING ARTICLE URLS
-# =========================================================
-def fetch_existing_urls(conn):
-    """Fetch all existing article URLs."""
-    try:
-        cur = conn.cursor()
-        cur.execute('SELECT url FROM "Articles"')
-        urls = {row[0] for row in cur.fetchall() if row[0]}
-        logging.info(f"Cached {len(urls)} existing article URLs.")
-        return urls
-    except Exception as e:
-        logging.error(f"Failed to fetch URLs: {e}")
-        return set()

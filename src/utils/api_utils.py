@@ -2,7 +2,8 @@ import requests
 from requests.adapters import HTTPAdapter, Retry
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
-from itertools import cycle
+from itertools import cycle, groupby
+from operator import itemgetter
 from datetime import datetime, timedelta
 from src.core.config import settings
 from src.core.logger import logging
@@ -36,6 +37,33 @@ def get_api_key():
     return next(key_cycle)
 
 # =========================================================
+# BUILD NEWSAPI QUERIES (Moved from pipeline)
+# =========================================================
+def build_sector_queries(startups, sector_map):
+    """
+    Groups startups by sector and builds the NewsAPI query strings.
+    """
+    logging.info("Building sector queries...")
+    sector_queries = []
+    
+    sorted_startups = sorted(startups, key=itemgetter('sectorId'))
+    
+    for sector_id, group in groupby(sorted_startups, key=itemgetter('sectorId')):
+        sector_name = sector_map.get(sector_id)
+        if not sector_name:
+            logging.warning(f"Skipping sectorId {sector_id}: No matching name found.")
+            continue
+            
+        startup_names = [f'"{s["name"]}"' for s in group]
+        startup_query = " OR ".join(startup_names)
+        final_query = f'({startup_query}) AND "{sector_name}"'
+        
+        sector_queries.append((sector_name, final_query))
+        
+    logging.info(f"Built {len(sector_queries)} queries for News API.")
+    return sector_queries
+
+# =========================================================
 # FETCH ARTICLES (Single Sector)
 # =========================================================
 def fetch_sector_articles(sector_name, query):
@@ -57,7 +85,7 @@ def fetch_sector_articles(sector_name, query):
             "to": to_date,
             "sortBy": "publishedAt",
             "searchIn": "title,description",
-            "pageSize": API_PAGE_SIZE,
+            "pageSize": API_PAGE_SIZE, # From constants
             "page": page,
             "apiKey": api_key,
         }
@@ -66,7 +94,7 @@ def fetch_sector_articles(sector_name, query):
             response = session.get(
                 "https://newsapi.org/v2/everything",
                 params=params,
-                timeout=FETCH_TIMEOUT,
+                timeout=FETCH_TIMEOUT, # From constants
             )
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
@@ -95,12 +123,11 @@ def fetch_sector_articles(sector_name, query):
 # =========================================================
 def fetch_articles_threaded(sector_queries):
     """
-    sector_queries: list of tuples (sector_name, query)
     Runs each query in its own thread and aggregates results.
     """
     all_articles = []
 
-    with ThreadPoolExecutor(max_workers=THREAD_COUNT) as executor:
+    with ThreadPoolExecutor(max_workers=THREAD_COUNT) as executor: # From constants
         futures = {
             executor.submit(fetch_sector_articles, sector, query): sector
             for sector, query in sector_queries
@@ -124,7 +151,6 @@ def fetch_articles_threaded(sector_queries):
 def deduplicate_articles(all_articles):
     """
     Deduplicates all articles using their 'url' as unique identifier.
-    Returns a dictionary {url: article}.
     """
     unique_articles = {}
     for article in all_articles:
