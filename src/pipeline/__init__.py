@@ -28,6 +28,11 @@ def main_pipeline():
         all_startups = db_utils.fetch_all_startups(conn)
         sector_map = db_utils.fetch_sector_map(conn)
         
+        # --- NEW ---
+        # Get set of startups that already have sentiment data
+        existing_startup_ids = db_utils.fetch_startup_ids_with_sentiment(conn)
+        # --- END NEW ---
+        
         if not all_startups or not sector_map:
             logging.error("No startups or sectors found. Exiting.")
             return
@@ -35,7 +40,12 @@ def main_pipeline():
         # =========================================================
         # STEP 2: Build API Queries
         # =========================================================
-        sector_queries = api_utils.build_sector_queries(all_startups, sector_map)
+        # Pass all data to the revised builder
+        sector_queries = api_utils.build_sector_queries(
+            all_startups, 
+            sector_map, 
+            existing_startup_ids
+        )
         if not sector_queries:
             logging.error("No API queries could be built. Exiting.")
             return
@@ -43,6 +53,8 @@ def main_pipeline():
         # =========================================================
         # STEP 3: Fetch and Deduplicate Articles
         # =========================================================
+        # fetch_articles_threaded is already updated to handle the new
+        # (name, query, date) format of sector_queries
         fetched_articles_list = api_utils.fetch_articles_threaded(sector_queries)
         unique_fetched_articles = api_utils.deduplicate_articles(fetched_articles_list)
         
@@ -71,7 +83,7 @@ def main_pipeline():
         # STEP 5: Build Startup Search Engine
         # =========================================================
         search_engine = StartupSearch()
-        search_engine.build_engine(conn)
+        search_engine.build_engine(all_startups) # Build with ALL startups
 
         # =========================================================
         # STEP 6: Process Articles and Analyze Sentiment

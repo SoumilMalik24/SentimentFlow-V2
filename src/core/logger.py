@@ -2,6 +2,7 @@ import logging
 import os
 from logging.handlers import RotatingFileHandler
 from src.core.config import settings
+import sys
 
 # Ensure log directory exists
 os.makedirs(settings.LOG_DIR, exist_ok=True)
@@ -18,20 +19,26 @@ formatter = logging.Formatter(
 )
 
 # Console handler
-console_handler = logging.StreamHandler()
+console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setFormatter(formatter)
-console_handler.setLevel(logging.INFO) # Ensure console logs INFO level
+console_handler.setLevel(logging.INFO)
 
 # File handler (rotating)
-file_handler = RotatingFileHandler(LOG_FILE_PATH, maxBytes=5_000_000, backupCount=3)
+
+file_handler = RotatingFileHandler(
+    LOG_FILE_PATH, 
+    maxBytes=5_000_000, 
+    backupCount=3, 
+    encoding='utf-8' 
+)
+# ----------------------
 file_handler.setFormatter(formatter)
-file_handler.setLevel(logging.INFO) # Ensure file logs INFO level
+file_handler.setLevel(logging.INFO)
 
 # Add handlers only if they haven't been added
 if not logger.hasHandlers():
     logger.addHandler(console_handler)
     logger.addHandler(file_handler)
 
-# Shorthand alias
 logging = logger
-logging.info("Logger initialized successfully.")
+

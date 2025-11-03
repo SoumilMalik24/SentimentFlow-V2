@@ -38,6 +38,25 @@ def fetch_all_startups(conn):
         raise
 
 # =========================================================
+# FETCH STARTUP IDS WITH EXISTING SENTIMENT (NEW FUNCTION)
+# =========================================================
+def fetch_startup_ids_with_sentiment(conn):
+    """
+    Fetches a set of all startup IDs that have at least one entry
+    in the ArticlesSentiment table.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute('SELECT DISTINCT "startupId" FROM "ArticlesSentiment"')
+            # Use a set for efficient O(1) lookups
+            startup_ids = {row[0] for row in cur.fetchall()}
+            logging.info(f"Found {len(startup_ids)} startups with existing sentiment.")
+            return startup_ids
+    except Exception as e:
+        logging.error(f"Failed to fetch existing startup IDs: {e}")
+        raise
+
+# =========================================================
 # FETCH SECTORS
 # =========================================================
 def fetch_sector_map(conn):
@@ -75,8 +94,6 @@ def batch_insert_articles(conn, articles: list):
     """
     Batch-inserts new articles.
     Does NOT commit; the pipeline must handle the transaction.
-    
-    articles (list[dict]): List of NewsAPI article dictionaries
     """
     if not articles:
         logging.info("No new articles to insert.")
@@ -163,7 +180,7 @@ def batch_insert_article_sentiments(conn, sentiment_records):
     try:
         with conn.cursor() as cur:
             execute_batch(cur, """
-                INSERT INTO "ArticleSentiment"
+                INSERT INTO "ArticlesSentiment"
                 (id, "articleId", "startupId", "positiveScore", "negativeScore", "neutralScore", sentiment, "createdAt")
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT ("articleId", "startupId") DO NOTHING;

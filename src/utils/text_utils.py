@@ -1,6 +1,7 @@
 import ahocorasick
 from src.core.logger import logging
-from psycopg2.extras import RealDictCursor
+import uuid
+import hashlib
 
 class StartupSearch:
     """
@@ -11,21 +12,17 @@ class StartupSearch:
         self.startup_map = {} # {startup_id: {"id": str, "name": str}}
         logging.info("StartupSearch engine initialized.")
 
-    def build_engine(self, conn):
+    def build_engine(self, startups: list):
         """
-        Build the Aho–Corasick automaton from startups in the DB.
+        Build the Aho–Corasick automaton from a provided list of startups.
+        
+        Args:
+            startups (list): A list of startup dicts, e.g.,
+                             [{"id": "...", "name": "..."}, ...]
         """
         logging.info("Building startup search engine...")
-        try:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute('SELECT id, name FROM "Startups"')
-                startups = cur.fetchall()
-        except Exception as e:
-            logging.error(f"Failed to fetch startups for search engine: {e}")
-            raise
-
         if not startups:
-            logging.warning("No startups found in DB to build search engine.")
+            logging.warning("No startups provided to build search engine.")
             self.automaton = ahocorasick.Automaton() # Empty automaton
             return
 
@@ -70,3 +67,24 @@ class StartupSearch:
         Returns the startup info dict ({"id": str, "name": str})
         """
         return self.startup_map.get(startup_id)
+
+# =========================================================
+# DETERMINISTIC STARTUP ID GENERATOR
+# =========================================================
+def generate_startup_id(name: str, sector_id: str) -> str:
+    """
+    Generates a deterministic, readable, unique ID based on startup name and sector ID.
+    Example: swiggy-51f4a2-9f2d
+    """
+    base_str = f"{name.lower()}|{str(sector_id).lower()}"
+    
+    # You can use any fixed UUID as a namespace
+    namespace = uuid.UUID("12345678-1234-5678-1234-567812345678")
+    stable_uuid = uuid.uuid5(namespace, base_str)
+
+    short_hash = hashlib.md5(base_str.encode()).hexdigest()[:6]
+    suffix = str(stable_uuid).split('-')[-1][:4]
+
+    readable_name = name.lower().replace(" ", "-").replace(".", "")
+    final_id = f"{readable_name}-{short_hash}-{suffix}"
+    return final_id
