@@ -24,7 +24,7 @@ session.mount("https://", adapter)
 session.mount("http://", adapter)
 
 # =========================================================
-# KEY ROTATION
+# KEY ROTATION (Cycle through multiple API keys)
 # =========================================================
 api_keys = settings.NEWS_API_KEYS
 if not api_keys or len(api_keys) == 0:
@@ -37,76 +37,93 @@ def get_api_key():
     return next(key_cycle)
 
 # =========================================================
-# BUILD NEWSAPI QUERIES (REVISED LOGIC)
+# BUILD NEWSAPI QUERIES 
 # =========================================================
-def build_sector_queries(startups, sector_map, existing_startup_ids):
+def build_sector_queries(all_startups_data, existing_startup_ids):
     """
-    Builds API queries, creating separate groups for 30-day (new)
-    and 1-day (existing) startups.
+    Builds smart queries based on the logic:
+    - New Startups (not in existing_ids): Fetch 30 days of news
+    - Existing Startups (in existing_ids): Fetch 1 day of news
+    
+    Query Format: (Startup A OR Startup B) AND ("Sector" OR "Keyword1" OR "Keyword2")
     """
-    logging.info("Building sector queries with 1-day/30-day logic...")
+    logging.info("Building API queries with 1-day/30-day logic...")
     
-    startups_30_day = []
-    startups_1_day = []
+    # 1. Separate startups into new vs. existing
+    new_startups = []
+    existing_startups = []
     
-    # Split startups into two groups based on whether they have existing sentiment
-    for s in startups:
-        if s['id'] in existing_startup_ids:
-            startups_1_day.append(s)
+    for startup in all_startups_data:
+        if startup['id'] in existing_startup_ids:
+            existing_startups.append(startup)
         else:
-            startups_30_day.append(s)
-            
-    logging.info(f"Query plan: {len(startups_30_day)} startups for 30-day backfill.")
-    logging.info(f"Query plan: {len(startups_1_day)} startups for 1-day update.")
+            new_startups.append(startup)
 
-    all_queries = [] # This will hold tuples of (sector_name, query_str, from_date)
+    logging.info(f"Found {len(new_startups)} new startups (30-day) and {len(existing_startups)} existing startups (1-day).")
 
-    # --- Process 30-DAY Startups ---
-    if startups_30_day:
-        from_date_30 = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-        sorted_startups_30 = sorted(startups_30_day, key=itemgetter('sectorId'))
-        
-        for sector_id, group in groupby(sorted_startups_30, key=itemgetter('sectorId')):
-            sector_name = sector_map.get(sector_id)
-            if not sector_name:
-                continue
-            
-            startup_names = [f'"{s["name"]}"' for s in group]
-            startup_query = " OR ".join(startup_names)
-            final_query = f'({startup_query}) AND "{sector_name}"'
-            
-            all_queries.append((f"{sector_name} (30-day)", final_query, from_date_30))
+    # 2. Define dates
+    today = datetime.now()
+    one_day_ago = (today - timedelta(days=1)).strftime("%Y-%m-%d")
+    thirty_days_ago = (today - timedelta(days=30)).strftime("%Y-%m-%d")
+    today_str = today.strftime("%Y-%m-%d")
 
-    # --- Process 1-DAY Startups ---
-    if startups_1_day:
-        from_date_1 = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-        sorted_startups_1 = sorted(startups_1_day, key=itemgetter('sectorId'))
-        
-        for sector_id, group in groupby(sorted_startups_1, key=itemgetter('sectorId')):
-            sector_name = sector_map.get(sector_id)
-            if not sector_name:
-                continue
-            
-            startup_names = [f'"{s["name"]}"' for s in group]
-            startup_query = " OR ".join(startup_names)
-            final_query = f'({startup_query}) AND "{sector_name}"'
-            
-            all_queries.append((f"{sector_name} (1-day)", final_query, from_date_1))
-        
-    logging.info(f"Built {len(all_queries)} total queries for News API.")
-    return all_queries
-
-# =========================================================
-# FETCH ARTICLES (Single Sector) (REVISED)
-# =========================================================
-def fetch_sector_articles(sector_name, query, from_date):
-    """
-    Fetch all articles for a given sector query with pagination.
-    Now accepts `from_date` as a parameter.
-    """
-    logging.info(f"Fetching articles for: {sector_name} (from: {from_date})")
+    # 3. Create query groups (sectorId, from_date, startups_list)
+    query_groups = []
     
-    to_date = datetime.now().strftime("%Y-%m-%d")
+    # Group new startups by sectorId
+    if new_startups:
+        sorted_new = sorted(new_startups, key=itemgetter('sectorId'))
+        for sector_id, group in groupby(sorted_new, key=itemgetter('sectorId')):
+            query_groups.append((sector_id, thirty_days_ago, today_str, list(group)))
+
+    # Group existing startups by sectorId
+    if existing_startups:
+        sorted_existing = sorted(existing_startups, key=itemgetter('sectorId'))
+        for sector_id, group in groupby(sorted_existing, key=itemgetter('sectorId')):
+            query_groups.append((sector_id, one_day_ago, today_str, list(group)))
+
+    # 4. Build the final query tuples (query_string, from_date, to_date)
+    final_queries = []
+    
+    for sector_id, from_date, to_date, startups_in_group in query_groups:
+        
+        # Build the startup part of the query
+        startup_names = [f'"{s["name"]}"' for s in startups_in_group]
+        startup_query = " OR ".join(startup_names)
+        
+        # Build the keyword part of the query
+        all_keywords = {s['sectorName'] for s in startups_in_group if s['sectorName']}
+        for s in startups_in_group:
+            # --- THIS IS THE FIX ---
+            # We use (s.get('findingKeywords') or []) to handle None values
+            all_keywords.update(s.get('findingKeywords') or [])
+            # --- END OF FIX ---
+        
+        # Ensure keywords are quoted
+        quoted_keywords = [f'"{k}"' for k in all_keywords if k] # Filter out None/empty
+        
+        if not quoted_keywords:
+            logging.warning(f"No sector or keywords for sectorId {sector_id}, skipping.")
+            continue
+            
+        keyword_query = " OR ".join(quoted_keywords)
+        
+        # Combine
+        final_query_str = f"({startup_query}) AND ({keyword_query})"
+        
+        logging.info(f"Built query for sector {sector_id} ({from_date}): {final_query_str}")
+        final_queries.append((final_query_str, from_date, to_date))
+
+    return final_queries
+
+# =========================================================
+# FETCH ARTICLES (Single Sector)
+# =========================================================
+def fetch_sector_articles(query, from_date, to_date):
+    """Fetch all articles for a given query and date range with pagination."""
+    query_log_name = f'query "{query[:50]}..."'
+    logging.info(f"Fetching articles for {query_log_name} (from: {from_date})")
+
     all_articles = []
     page = 1
 
@@ -115,7 +132,7 @@ def fetch_sector_articles(sector_name, query, from_date):
         params = {
             "q": query,
             "language": "en",
-            "from": from_date, # Use the provided from_date
+            "from": from_date,
             "to": to_date,
             "sortBy": "publishedAt",
             "searchIn": "title,description",
@@ -132,7 +149,7 @@ def fetch_sector_articles(sector_name, query, from_date):
             )
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
-            logging.warning(f"Request failed for {sector_name} page {page}: {e}")
+            logging.warning(f"Request failed for {query_log_name} page {page}: {e}")
             break
 
         data = response.json()
@@ -141,7 +158,7 @@ def fetch_sector_articles(sector_name, query, from_date):
 
         articles = data["articles"]
         all_articles.extend(articles)
-        logging.info(f"{len(articles)} articles fetched for {sector_name} (page {page})")
+        logging.info(f"{len(articles)} articles fetched for {query_log_name} (page {page})")
 
         if len(articles) < API_PAGE_SIZE:
             break
@@ -149,34 +166,33 @@ def fetch_sector_articles(sector_name, query, from_date):
         page += 1
         time.sleep(1.2)  # respect rate limits
 
-    logging.info(f"Total fetched for {sector_name}: {len(all_articles)} articles.")
+    logging.info(f"Total fetched for {query_log_name}: {len(all_articles)} articles.")
     return all_articles
 
 # =========================================================
-# MULTI-THREADED FETCHING (REVISED)
+# MULTI-THREADED FETCHING (Sector-Level)
 # =========================================================
 def fetch_articles_threaded(sector_queries):
     """
+    sector_queries: list of tuples (query_string, from_date, to_date)
     Runs each query in its own thread and aggregates results.
-    `sector_queries` is now a list of (sector_name, query, from_date)
     """
     all_articles = []
 
     with ThreadPoolExecutor(max_workers=THREAD_COUNT) as executor:
-        # Update submit call to pass all three arguments
         futures = {
-            executor.submit(fetch_sector_articles, name, q, date): name
-            for (name, q, date) in sector_queries
+            executor.submit(fetch_sector_articles, query, from_date, to_date): query
+            for query, from_date, to_date in sector_queries
         }
 
         for future in as_completed(futures):
-            sector = futures[future]
+            query_str = futures[future]
             try:
                 articles = future.result()
                 all_articles.extend(articles)
-                logging.info(f"Completed sector fetch: {sector} ({len(articles)} articles)")
+                logging.info(f"Completed sector fetch: {query_str[:50]}... ({len(articles)} articles)")
             except Exception as e:
-                logging.error(f"Failed to fetch sector {sector}: {e}")
+                logging.error(f"Failed to fetch sector query {query_str[:50]}...: {e}")
 
     logging.info(f"Total fetched across sectors: {len(all_articles)} articles.")
     return all_articles
@@ -187,6 +203,7 @@ def fetch_articles_threaded(sector_queries):
 def deduplicate_articles(all_articles):
     """
     Deduplicates all articles using their 'url' as unique identifier.
+    Returns a dictionary {url: article}.
     """
     unique_articles = {}
     for article in all_articles:
@@ -197,3 +214,4 @@ def deduplicate_articles(all_articles):
 
     logging.info(f"Deduplicated articles: {len(unique_articles)} unique URLs.")
     return unique_articles
+

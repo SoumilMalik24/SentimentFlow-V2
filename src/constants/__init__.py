@@ -1,4 +1,4 @@
-from core.config import settings
+from src.core.config import settings
 
 # General constants
 MAX_CONTENT_PREVIEW = 300

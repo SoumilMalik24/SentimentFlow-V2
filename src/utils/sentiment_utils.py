@@ -8,7 +8,6 @@ from src.constants import MODEL_MAX_LENGTH
 # =========================================================
 # MODEL INITIALIZATION
 # =========================================================
-# We use MODEL_PATH to load the ID from your settings
 MODEL_ID = settings.MODEL_PATH 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -24,29 +23,60 @@ except Exception as e:
     raise
 
 # =========================================================
-# BATCH ZERO-SHOT SENTIMENT PREDICTION
+# BULK SENTIMENT ANALYSIS (NEW)
 # =========================================================
-def predict_batch_for_startups(article_text: str, startups: list):
+def analyze_all_articles_in_bulk(articles_with_startups: list):
     """
-    Runs batched zero-shot sentiment analysis for all startups mentioned in one article.
+    Analyzes all articles and their found startups in a single model call.
+
+    Args:
+        articles_with_startups (list): 
+            A list of tuples: [(article_row, list_of_startups), ...]
+            e.g., [
+                ( {"id": "a1", "title": "...", "content": "..."}, [{"id": "s1", "name": "Swiggy"}] ),
+                ( {"id": "a2", "title": "...", "content": "..."}, [{"id": "s1", "name": "Swiggy"}, {"id": "s2", "name": "Zomato"}] )
+            ]
+    
+    Returns:
+        list[dict]: A flat list of DB-ready sentiment records.
     """
-    if not startups:
-        return {}
+    if not articles_with_startups:
+        logging.info("No articles to analyze in bulk.")
+        return []
+
+    logging.info(f"Building one giant batch for {len(articles_with_startups)} articles...")
 
     labels = ["positive", "neutral", "negative"]
-    texts, hypotheses, mapping = [], [], []
+    
+    # These lists will hold all data for the single model call
+    all_premises = []     # All article texts
+    all_hypotheses = []   # All hypotheses
+    all_mappings = []     # Tuples to map results back: (articleId, startupId, label)
 
-    for startup in startups:
-        for label in labels:
-            texts.append(article_text)
-            # This is the "hypothesis" you were building
-            hypotheses.append(f"the news for {startup['name']} is {label}")
-            mapping.append((startup["id"], label))
+    for article_row, startups_to_analyze in articles_with_startups:
+        article_text = f"{article_row.get('title', '')}. {article_row.get('content', '')}"
+        article_id = article_row["id"]
+
+        for startup in startups_to_analyze:
+            startup_id = startup["id"]
+            startup_name = startup["name"]
+            
+            for label in labels:
+                all_premises.append(article_text)
+                all_hypotheses.append(f"the news for {startup_name} is {label}")
+                all_mappings.append((article_id, startup_id, label))
+
+    if not all_premises:
+        logging.info("No startup/article pairs to analyze.")
+        return []
+
+    logging.info(f"Calling model ONCE with a total batch size of {len(all_premises)}...")
 
     try:
+        # Tokenize and predict in one go
         inputs = tokenizer(
-            texts,
-            hypotheses,
+            all_premises,
+            all_hypotheses,
             return_tensors="pt",
             truncation=True,
             padding=True,
@@ -55,65 +85,42 @@ def predict_batch_for_startups(article_text: str, startups: list):
 
         with torch.no_grad():
             logits = model(**inputs).logits
-            # This is where we get the probabilities (F.softmax)
             probs = F.softmax(logits, dim=1) 
-            
-            # This is your "entail_scores" (probs[:, 0])
             entailment_scores = probs[:, 0].cpu().numpy().tolist()
 
-        # Aggregate scores per startup
-        results = {}
-        for (startup_id, label), score in zip(mapping, entailment_scores):
-            if startup_id not in results:
-                results[startup_id] = {lbl + "Score": 0.0 for lbl in labels}
+        # =========================================================
+        # Process the single batch of results
+        # =========================================================
+        
+        # 1. Aggregate scores
+        # This dict will look like: { (articleId, startupId): { "positiveScore": 0.9, ... } }
+        aggregated_scores = {}
 
-            # This is where we save the "positive", "neutral", and "negative" scores
-            results[startup_id][label + "Score"] = round(float(score), 4)
+        for (article_id, startup_id, label), score in zip(all_mappings, entailment_scores):
+            key = (article_id, startup_id)
+            if key not in aggregated_scores:
+                aggregated_scores[key] = {}
+            
+            aggregated_scores[key][label + "Score"] = round(float(score), 4)
 
-        # Determine final sentiment for each startup
-        for sid, data in results.items():
-            best_label = max(labels, key=lambda x: data[x + "Score"])
-            data["sentiment"] = best_label
-
-        return results
+        # 2. Format for database
+        db_records = []
+        for (article_id, startup_id), scores_dict in aggregated_scores.items():
+            # Determine best sentiment
+            best_label = max(labels, key=lambda x: scores_dict[x + "Score"])
+            
+            db_records.append({
+                "articleId": article_id,
+                "startupId": startup_id,
+                "positiveScore": scores_dict["positiveScore"],
+                "neutralScore": scores_dict["neutralScore"],
+                "negativeScore": scores_dict["negativeScore"],
+                "sentiment": best_label
+            })
+        
+        logging.info(f"Generated {len(db_records)} total sentiment entries from bulk analysis.")
+        return db_records
 
     except Exception as e:
-        logging.error(f"Batch prediction failed: {e}")
-        return {}
-
-# =========================================================
-# ARTICLE SENTIMENT BATCH WRAPPER
-# =========================================================
-def analyze_article_sentiments(article: dict, startups: list):
-    """
-    Analyzes one article for multiple startups and returns DB-ready sentiment records.
-    """
-    if not startups:
+        logging.error(f"Bulk prediction failed: {e}", exc_info=True)
         return []
-
-    text = f"{article.get('title', '')}. {article.get('content', '')}"
-    article_id = article["id"]
-
-    predictions = predict_batch_for_startups(text, startups)
-    if not predictions:
-        return []
-
-    db_records = []
-    for startup in startups:
-        sid = startup["id"]
-        if sid not in predictions:
-            continue
-
-        scores = predictions[sid]
-        # This creates the final dictionary for the database
-        db_records.append({
-            "articleId": article_id,
-            "startupId": sid,
-            "positiveScore": scores["positiveScore"],
-            "neutralScore": scores["neutralScore"],
-            "negativeScore": scores["negativeScore"],
-            "sentiment": scores["sentiment"]
-        })
-
-    logging.info(f"Generated {len(db_records)} sentiment entries for article {article_id}")
-    return db_records

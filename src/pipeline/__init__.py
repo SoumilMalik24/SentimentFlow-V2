@@ -6,7 +6,6 @@ project_root = dirname(dirname(abspath(__file__)))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-# Imports now use your new logger
 from src.core.logger import logging 
 from src.utils import api_utils, db_utils, sentiment_utils
 from src.utils.text_utils import StartupSearch
@@ -25,27 +24,21 @@ def main_pipeline():
         if conn is None:
             raise Exception("Failed to get database connection.")
 
-        all_startups = db_utils.fetch_all_startups(conn)
-        sector_map = db_utils.fetch_sector_map(conn)
-        
-        # --- NEW ---
-        # Get set of startups that already have sentiment data
+        all_startups_data = db_utils.fetch_startups_for_api(conn)
         existing_startup_ids = db_utils.fetch_startup_ids_with_sentiment(conn)
-        # --- END NEW ---
         
-        if not all_startups or not sector_map:
-            logging.error("No startups or sectors found. Exiting.")
+        if not all_startups_data:
+            logging.error("No startups found in 'Startups' table. Exiting.")
             return
 
         # =========================================================
         # STEP 2: Build API Queries
         # =========================================================
-        # Pass all data to the revised builder
         sector_queries = api_utils.build_sector_queries(
-            all_startups, 
-            sector_map, 
+            all_startups_data, 
             existing_startup_ids
         )
+        
         if not sector_queries:
             logging.error("No API queries could be built. Exiting.")
             return
@@ -53,8 +46,6 @@ def main_pipeline():
         # =========================================================
         # STEP 3: Fetch and Deduplicate Articles
         # =========================================================
-        # fetch_articles_threaded is already updated to handle the new
-        # (name, query, date) format of sector_queries
         fetched_articles_list = api_utils.fetch_articles_threaded(sector_queries)
         unique_fetched_articles = api_utils.deduplicate_articles(fetched_articles_list)
         
@@ -83,40 +74,42 @@ def main_pipeline():
         # STEP 5: Build Startup Search Engine
         # =========================================================
         search_engine = StartupSearch()
-        search_engine.build_engine(all_startups) # Build with ALL startups
+        search_engine.build_engine(all_startups_data) 
 
         # =========================================================
-        # STEP 6: Process Articles and Analyze Sentiment
+        # STEP 6: Process Articles and Analyze Sentiment (REVISED)
         # =========================================================
-        all_sentiment_records = []
         
+        # 1. First, find all startups mentioned in all articles (in-memory)
+        logging.info("Finding all startup mentions in new articles...")
+        articles_to_process = []
         for url, article_row in articles_from_db.items():
             try:
-                logging.info(f"Processing article: {article_row.get('title', 'No Title')[:70]}...")
-                
                 text_to_search = f"{article_row['title']}. {article_row['content']}"
                 found_startup_ids = search_engine.find_startups_in_text(text_to_search)
                 
                 if not found_startup_ids:
-                    logging.info("No registered startups found in this article.")
+                    logging.info(f"No registered startups found in article: {article_row.get('title', 'No Title')[:30]}...")
                     continue
                     
                 startups_to_analyze = [
                     info for sid in found_startup_ids 
                     if (info := search_engine.get_startup_info(sid))
                 ]
-
-                logging.info(f"Found {len(startups_to_analyze)} startups to analyze: {[s['name'] for s in startups_to_analyze]}")
                 
-                sentiment_records = sentiment_utils.analyze_article_sentiments(
-                    article_row,
-                    startups_to_analyze
-                )
-                
-                all_sentiment_records.extend(sentiment_records)
+                if startups_to_analyze:
+                    articles_to_process.append((article_row, startups_to_analyze))
+                    logging.info(f"Found {len(startups_to_analyze)} startups in article: {article_row.get('title', 'No Title')[:30]}...")
 
             except Exception as e:
-                logging.error(f"Failed to process article {article_row.get('url')}: {e}")
+                logging.error(f"Failed to find startups in article {article_row.get('url')}: {e}")
+
+        # 2. Now, run the model ONCE for all articles in a single bulk call
+        if not articles_to_process:
+            logging.info("No startups found in any new articles. Pipeline complete.")
+            return
+
+        all_sentiment_records = sentiment_utils.analyze_all_articles_in_bulk(articles_to_process)
 
         # =========================================================
         # STEP 7: Batch Insert All Sentiments and Commit
@@ -140,3 +133,9 @@ def main_pipeline():
         if conn:
             conn.close()
             logging.info("Database connection closed.")
+
+
+if __name__ == "__main__":
+    # To run: python -m src.pipeline
+    main_pipeline()
+

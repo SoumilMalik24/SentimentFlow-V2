@@ -1,6 +1,7 @@
 import psycopg2
 from psycopg2.extras import RealDictCursor, execute_batch
 import uuid
+import json  # <-- Import json
 from datetime import datetime
 from src.core.config import settings
 from src.core.logger import logging
@@ -20,61 +21,58 @@ def get_connection():
         raise
 
 # =========================================================
-# FETCH STARTUPS
+# == MAIN PIPELINE FUNCTIONS
 # =========================================================
-def fetch_all_startups(conn):
-    """Fetch all startups (id, name, sectorId) from the DB."""
+
+def fetch_startups_for_api(conn):
+    """
+    Fetches all startup details needed for API query building.
+    Joins with Sector to get sectorName and fetches findingKeywords (as JSON string).
+    """
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
-                SELECT id, name, "sectorId"
-                FROM "Startups"
+                SELECT 
+                    s.id, 
+                    s.name, 
+                    s."sectorId", 
+                    s."findingKeywords", 
+                    sec.name AS "sectorName"
+                FROM "Startups" s
+                LEFT JOIN "Sector" sec ON s."sectorId" = sec.id
             """)
             rows = cur.fetchall()
-            logging.info(f"Fetched {len(rows)} startups from DB.")
+            
+            # --- Parse JSON string back into a list ---
+            for row in rows:
+                if row['findingKeywords'] and isinstance(row['findingKeywords'], str):
+                    try:
+                        row['findingKeywords'] = json.loads(row['findingKeywords'])
+                    except json.JSONDecodeError:
+                        logging.warning(f"Failed to parse findingKeywords for {row['name']}: {row['findingKeywords']}")
+                        row['findingKeywords'] = []
+                elif not row['findingKeywords']:
+                    row['findingKeywords'] = []
+            # --- End of JSON parse ---
+
+            logging.info(f"Fetched {len(rows)} startups with sector/keyword data.")
             return rows
     except Exception as e:
-        logging.error(f"Failed to fetch startups: {e}")
+        logging.error(f"Failed to fetch startups with details: {e}")
         raise
 
-# =========================================================
-# FETCH STARTUP IDS WITH EXISTING SENTIMENT (NEW FUNCTION)
-# =========================================================
 def fetch_startup_ids_with_sentiment(conn):
-    """
-    Fetches a set of all startup IDs that have at least one entry
-    in the ArticlesSentiment table.
-    """
+    """Fetch a set of all startup IDs that have at least one sentiment entry."""
     try:
         with conn.cursor() as cur:
             cur.execute('SELECT DISTINCT "startupId" FROM "ArticlesSentiment"')
-            # Use a set for efficient O(1) lookups
-            startup_ids = {row[0] for row in cur.fetchall()}
-            logging.info(f"Found {len(startup_ids)} startups with existing sentiment.")
-            return startup_ids
+            ids = {row[0] for row in cur.fetchall()}
+            logging.info(f"Found {len(ids)} startups with existing sentiment data.")
+            return ids
     except Exception as e:
-        logging.error(f"Failed to fetch existing startup IDs: {e}")
-        raise
+        logging.error(f"Failed to fetch startup IDs with sentiment: {e}")
+        raise # Re-raise to stop pipeline
 
-# =========================================================
-# FETCH SECTORS
-# =========================================================
-def fetch_sector_map(conn):
-    """Fetch a map of {sector_id: sector_name}."""
-    try:
-        with conn.cursor() as cur:
-            cur.execute('SELECT id, name FROM "Sector"')
-            rows = cur.fetchall()
-            sector_map = {row[0]: row[1] for row in rows}
-            logging.info(f"Fetched {len(sector_map)} sectors from DB.")
-            return sector_map
-    except Exception as e:
-        logging.error(f"Failed to fetch sector map: {e}")
-        raise
-
-# =========================================================
-# FETCH EXISTING ARTICLE URLS
-# =========================================================
 def fetch_existing_urls(conn):
     """Fetch all existing article URLs for deduplication."""
     try:
@@ -85,11 +83,8 @@ def fetch_existing_urls(conn):
             return urls
     except Exception as e:
         logging.error(f"Failed to fetch URLs: {e}")
-        return set()
+        raise # Re-raise to stop pipeline
 
-# =========================================================
-# BATCH INSERT ARTICLES
-# =========================================================
 def batch_insert_articles(conn, articles: list):
     """
     Batch-inserts new articles.
@@ -101,7 +96,6 @@ def batch_insert_articles(conn, articles: list):
 
     insert_data = []
     for article in articles:
-        # Prepare content: truncate if necessary
         content = (article.get("content") or article.get("description") or "").strip()
         if len(content) > MAX_CONTENT_PREVIEW:
             content = content[:MAX_CONTENT_PREVIEW].rsplit(" ", 1)[0] + "..."
@@ -128,9 +122,6 @@ def batch_insert_articles(conn, articles: list):
         logging.error(f"Failed to batch insert articles: {e}")
         raise
 
-# =========================================================
-# GET ARTICLES BY URLS
-# =========================================================
 def get_articles_by_urls(conn, urls: list):
     """
     Fetches newly inserted articles (with their DB IDs) by their URLs.
@@ -151,9 +142,6 @@ def get_articles_by_urls(conn, urls: list):
         logging.error(f"Failed to get articles by URLs: {e}")
         raise
 
-# =========================================================
-# BATCH INSERT SENTIMENTS
-# =========================================================
 def batch_insert_article_sentiments(conn, sentiment_records):
     """
     Batch-inserts multiple sentiment analysis results.
@@ -189,3 +177,74 @@ def batch_insert_article_sentiments(conn, sentiment_records):
     except Exception as e:
         logging.error(f"Failed to batch insert sentiments: {e}")
         raise
+
+# =========================================================
+# == ADMIN SCRIPT FUNCTIONS
+# =========================================================
+
+def fetch_all_sectors(conn):
+    """
+    Fetches all sectors (id, name) from the Sector table.
+    """
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute('SELECT id, name FROM "Sector" ORDER BY name')
+            return cur.fetchall()
+    except Exception as e:
+        logging.error(f"Failed to fetch all sectors: {e}")
+        raise
+
+def get_sector_id_by_name(conn, sector_name: str):
+    """
+    Fetches the ID of a sector given its name.
+    """
+    try:
+        with conn.cursor() as cur:
+            # Added LOWER() and strip() for robustness
+            cur.execute('SELECT id FROM "Sector" WHERE LOWER(name) = LOWER(%s)', (sector_name.strip(),))
+            result = cur.fetchone()
+            if result:
+                return result[0]
+            else:
+                logging.warning(f"No sector found with name: {sector_name}")
+                return None
+    except Exception as e:
+        logging.error(f"Failed to fetch sector by name: {e}")
+        raise
+
+def upsert_startup(conn, startup_data: dict):
+    """
+    Inserts or updates a startup.
+    Converts findingKeywords list into a JSON string for storage.
+    """
+    try:
+        # --- Convert list to JSON string before saving ---
+        keywords_list = startup_data.get("findingKeywords", [])
+        keywords_json_string = json.dumps(keywords_list)
+        # --- End of JSON conversion ---
+
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO "Startups"
+                (id, name, "sectorId", description, "imageUrl", "findingKeywords", "createdAt")
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    "sectorId" = EXCLUDED."sectorId",
+                    description = EXCLUDED.description,
+                    "imageUrl" = EXCLUDED."imageUrl",
+                    "findingKeywords" = EXCLUDED."findingKeywords";
+            """, (
+                startup_data["id"],
+                startup_data["name"],
+                startup_data["sectorId"],
+                startup_data.get("description", ""),
+                startup_data.get("imageUrl", ""),
+                keywords_json_string,  # <-- Pass the JSON string here
+                datetime.now()
+            ))
+            logging.info(f"Upserted startup: {startup_data['name']} (ID: {startup_data['id']})")
+    except Exception as e:
+        logging.error(f"Failed to upsert startup {startup_data['name']}: {e}")
+        raise
+
