@@ -9,3 +9,4 @@ python-dotenv
 pydantic
 pyahocorasick
 concurrent-log-handler
+streamlit

@@ -1,41 +1,35 @@
-import psycopg2
 import sys
-import os
+from src.utils import db_utils
+from src.core.logger import logging
 
-# This is the minimum required to import your settings
-project_root = os.path.dirname(os.path.abspath(__file__))
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
-    
-try:
-    from src.core.config import settings
-except ImportError:
-    print("Error: Could not import settings. Make sure this script is in the root (same folder as src/).")
-    sys.exit(1)
+def fix_database_column():
+    """
+    Changes the "findingKeywords" column in the "Startups" table
+    from TEXT[] (or any other type) to TEXT.
+    This is necessary to store keywords as a JSON string,
+    bypassing the Prisma proxy array issue.
+    """
+    conn = None
+    try:
+        conn = db_utils.get_connection()
+        with conn.cursor() as cur:
+            logging.info('Attempting to change "findingKeywords" column type to TEXT...')
+            cur.execute('ALTER TABLE "Startups" ALTER COLUMN "findingKeywords" TYPE TEXT;')
+            conn.commit()
+            logging.info('SUCCESS: "findingKeywords" column is now TEXT.')
 
-conn = None
-try:
-    print("Connecting to database...")
-    conn = psycopg2.connect(settings.DB_URL)
-    
-    with conn.cursor() as cur:
-        print('Executing: ALTER TABLE "Articles" ADD CONSTRAINT articles_url_unique UNIQUE (url);')
-        cur.execute('ALTER TABLE "Articles" ADD CONSTRAINT articles_url_unique UNIQUE (url);')
-    
-    # Commit the change
-    print("Committing transaction...")
-    conn.commit()
-    
-    print("Successfully added UNIQUE constraint to 'Articles.url'.")
+    except Exception as e:
+        logging.error(f"Failed to alter table: {e}")
+        if conn:
+            conn.rollback()
+    finally:
+        if conn:
+            conn.close()
 
-except (Exception, psycopg2.Error) as e:
-    if "already exists" in str(e):
-        print("Warning: Constraint 'articles_url_unique' already exists. No action taken.")
+if __name__ == "__main__":
+    if "--run" in sys.argv:
+        fix_database_column()
     else:
-        print(f"Failed to add constraint: {e}")
-    if conn:
-        conn.rollback()
-finally:
-    if conn:
-        conn.close()
-        print("Database connection closed.")
+        logging.warning("This is a safety check.")
+        logging.warning('Run this script with "python test.py --run" to execute the database migration.')
+
