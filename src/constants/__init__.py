@@ -17,3 +17,7 @@ SUMMARY_FILE_PATTERN = "logs/pipeline_summary_{timestamp}.json"
 
 #api keys
 NEWS_API_KEYS = settings.NEWS_API_KEYS
+
+# Model settings
+MODEL_MAX_LENGTH = 256
+MODEL_BATCH_SIZE = 32

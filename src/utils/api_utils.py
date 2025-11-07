@@ -94,13 +94,9 @@ def build_sector_queries(all_startups_data, existing_startup_ids):
         # Build the keyword part of the query
         all_keywords = {s['sectorName'] for s in startups_in_group if s['sectorName']}
         for s in startups_in_group:
-            # --- THIS IS THE FIX ---
-            # We use (s.get('findingKeywords') or []) to handle None values
             all_keywords.update(s.get('findingKeywords') or [])
-            # --- END OF FIX ---
         
-        # Ensure keywords are quoted
-        quoted_keywords = [f'"{k}"' for k in all_keywords if k] # Filter out None/empty
+        quoted_keywords = [f'"{k}"' for k in all_keywords if k]
         
         if not quoted_keywords:
             logging.warning(f"No sector or keywords for sectorId {sector_id}, skipping.")
@@ -108,7 +104,6 @@ def build_sector_queries(all_startups_data, existing_startup_ids):
             
         keyword_query = " OR ".join(quoted_keywords)
         
-        # Combine
         final_query_str = f"({startup_query}) AND ({keyword_query})"
         
         logging.info(f"Built query for sector {sector_id} ({from_date}): {final_query_str}")
@@ -164,7 +159,7 @@ def fetch_sector_articles(query, from_date, to_date):
             break
 
         page += 1
-        time.sleep(1.2)  # respect rate limits
+        time.sleep(1.2) 
 
     logging.info(f"Total fetched for {query_log_name}: {len(all_articles)} articles.")
     return all_articles

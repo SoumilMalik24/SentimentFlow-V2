@@ -1,7 +1,7 @@
 import psycopg2
 from psycopg2.extras import RealDictCursor, execute_batch
 import uuid
-import json  # <-- Import json
+import json 
 from datetime import datetime
 from src.core.config import settings
 from src.core.logger import logging
@@ -43,7 +43,6 @@ def fetch_startups_for_api(conn):
             """)
             rows = cur.fetchall()
             
-            # --- Parse JSON string back into a list ---
             for row in rows:
                 if row['findingKeywords'] and isinstance(row['findingKeywords'], str):
                     try:
@@ -53,7 +52,6 @@ def fetch_startups_for_api(conn):
                         row['findingKeywords'] = []
                 elif not row['findingKeywords']:
                     row['findingKeywords'] = []
-            # --- End of JSON parse ---
 
             logging.info(f"Fetched {len(rows)} startups with sector/keyword data.")
             return rows
@@ -71,7 +69,7 @@ def fetch_startup_ids_with_sentiment(conn):
             return ids
     except Exception as e:
         logging.error(f"Failed to fetch startup IDs with sentiment: {e}")
-        raise # Re-raise to stop pipeline
+        raise
 
 def fetch_existing_urls(conn):
     """Fetch all existing article URLs for deduplication."""
@@ -83,7 +81,7 @@ def fetch_existing_urls(conn):
             return urls
     except Exception as e:
         logging.error(f"Failed to fetch URLs: {e}")
-        raise # Re-raise to stop pipeline
+        raise 
 
 def batch_insert_articles(conn, articles: list):
     """
@@ -200,7 +198,6 @@ def get_sector_id_by_name(conn, sector_name: str):
     """
     try:
         with conn.cursor() as cur:
-            # Added LOWER() and strip() for robustness
             cur.execute('SELECT id FROM "Sector" WHERE LOWER(name) = LOWER(%s)', (sector_name.strip(),))
             result = cur.fetchone()
             if result:
@@ -218,10 +215,8 @@ def upsert_startup(conn, startup_data: dict):
     Converts findingKeywords list into a JSON string for storage.
     """
     try:
-        # --- Convert list to JSON string before saving ---
         keywords_list = startup_data.get("findingKeywords", [])
         keywords_json_string = json.dumps(keywords_list)
-        # --- End of JSON conversion ---
 
         with conn.cursor() as cur:
             cur.execute("""
@@ -240,7 +235,7 @@ def upsert_startup(conn, startup_data: dict):
                 startup_data["sectorId"],
                 startup_data.get("description", ""),
                 startup_data.get("imageUrl", ""),
-                keywords_json_string,  # <-- Pass the JSON string here
+                keywords_json_string, 
                 datetime.now()
             ))
             logging.info(f"Upserted startup: {startup_data['name']} (ID: {startup_data['id']})")

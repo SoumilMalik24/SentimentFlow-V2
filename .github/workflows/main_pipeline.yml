@@ -1,0 +1,36 @@
+name: Run Main Sentiment Pipeline
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    - cron: '30 1 * * *'  
+    - cron: '30 7 * * *'  
+    - cron: '30 13 * * *' 
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Main Sentiment Pipeline
+        run: python main.py
+        
+        env:
+          DB_URL: ${{ secrets.DB_URL }}
+          NEWS_API_KEYS: ${{ secrets.NEWS_API_KEYS }}
+          MODEL_PATH: ${{ secrets.MODEL_PATH }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}

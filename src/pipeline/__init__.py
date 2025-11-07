@@ -98,7 +98,13 @@ def main_pipeline():
                 ]
                 
                 if startups_to_analyze:
-                    articles_to_process.append((article_row, startups_to_analyze))
+                    # --- THIS IS THE FIX ---
+                    # We append a dictionary, not a tuple
+                    articles_to_process.append({
+                        "article": article_row, 
+                        "startups_to_analyze": startups_to_analyze
+                    })
+                    # --- END OF FIX ---
                     logging.info(f"Found {len(startups_to_analyze)} startups in article: {article_row.get('title', 'No Title')[:30]}...")
 
             except Exception as e:
@@ -138,4 +144,3 @@ def main_pipeline():
 if __name__ == "__main__":
     # To run: python -m src.pipeline
     main_pipeline()
-
