@@ -1,7 +1,8 @@
 import psycopg2
 from psycopg2.extras import RealDictCursor, execute_batch
 import uuid
-import json 
+import json
+import re  
 from datetime import datetime
 from src.core.config import settings
 from src.core.logger import logging
@@ -21,13 +22,33 @@ def get_connection():
         raise
 
 # =========================================================
-# == MAIN PIPELINE FUNCTIONS
+# == HELPER FOR TRUNCATION 
+# =========================================================
+def _clean_and_truncate_content(content_str: str) -> str:
+    """
+    Cleans and truncates article content for database storage.
+    """
+    if not content_str:
+        return ""
+    
+    # 1. Remove trailing "[+123 chars]" patterns
+    cleaned_content = re.sub(r'\s*\[\+\d+\s+chars\]$', '', content_str)
+    
+    # 2. Check length and truncate if necessary
+    if len(cleaned_content) > MAX_CONTENT_PREVIEW:
+        truncated = cleaned_content[:MAX_CONTENT_PREVIEW].rsplit(' ', 1)[0]
+        return truncated + "..."
+    
+    return cleaned_content
+
+# =========================================================
+# == MAIN PIPELINE FUNCTIONS 
 # =========================================================
 
 def fetch_startups_for_api(conn):
     """
     Fetches all startup details needed for API query building.
-    Joins with Sector to get sectorName and fetches findingKeywords (as JSON string).
+    Joins with Sector to get sectorName and fetches findingKeywords.
     """
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -81,8 +102,11 @@ def fetch_existing_urls(conn):
             return urls
     except Exception as e:
         logging.error(f"Failed to fetch URLs: {e}")
-        raise 
+        raise
 
+# =========================================================
+# BATCH INSERT ARTICLES (REVISED)
+# =========================================================
 def batch_insert_articles(conn, articles: list):
     """
     Batch-inserts new articles.
@@ -94,15 +118,15 @@ def batch_insert_articles(conn, articles: list):
 
     insert_data = []
     for article in articles:
-        content = (article.get("content") or article.get("description") or "").strip()
-        if len(content) > MAX_CONTENT_PREVIEW:
-            content = content[:MAX_CONTENT_PREVIEW].rsplit(" ", 1)[0] + "..."
+        raw_content = (article.get("content") or article.get("description") or "").strip()
+        
+        cleaned_content = _clean_and_truncate_content(raw_content)
             
         insert_data.append((
             str(uuid.uuid4()),
             article.get("title", "untitled"),
             article["url"],
-            content,
+            cleaned_content, 
             article.get("publishedAt"),
             datetime.now()
         ))
@@ -181,9 +205,7 @@ def batch_insert_article_sentiments(conn, sentiment_records):
 # =========================================================
 
 def fetch_all_sectors(conn):
-    """
-    Fetches all sectors (id, name) from the Sector table.
-    """
+    """Fetches all sectors for the Streamlit dropdown."""
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute('SELECT id, name FROM "Sector" ORDER BY name')
@@ -235,11 +257,10 @@ def upsert_startup(conn, startup_data: dict):
                 startup_data["sectorId"],
                 startup_data.get("description", ""),
                 startup_data.get("imageUrl", ""),
-                keywords_json_string, 
+                keywords_json_string,  
                 datetime.now()
             ))
             logging.info(f"Upserted startup: {startup_data['name']} (ID: {startup_data['id']})")
     except Exception as e:
         logging.error(f"Failed to upsert startup {startup_data['name']}: {e}")
         raise
-
